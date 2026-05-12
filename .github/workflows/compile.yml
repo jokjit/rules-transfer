@@ -3,19 +3,37 @@ name: 编译规则集
 on:
   workflow_dispatch:
     inputs:
-      json_url:
-        description: "可选 新规则JSON链接"
+      rule_url:
+        description: "可选 新规则链接（JSON/YAML）"
         required: false
         type: string
       rule_name:
-        description: "可选 规则名称不含扩展名"
+        description: "可选 规则名称（不含扩展名）"
         required: false
         type: string
+      rule_format:
+        description: "规则格式（json→srs / yaml→mrs）"
+        required: false
+        default: "json"
+        type: choice
+        options:
+          - json
+          - yaml
+      rule_type:
+        description: "YAML 规则类型（仅 yaml 时有效）"
+        required: false
+        default: "domain"
+        type: choice
+        options:
+          - domain
+          - ipcidr
+          - classical
   schedule:
     - cron: "0 0 * * *"
   push:
     paths:
       - "rules/**.json"
+      - "rules/**.yaml"
 
 permissions:
   contents: write
@@ -25,8 +43,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EVENT_NAME: ${{ github.event_name }}
-      INPUT_URL: ${{ github.event.inputs.json_url }}
-      INPUT_NAME: ${{ github.event.inputs.rule_name }}
+      INPUT_URL:    ${{ github.event.inputs.rule_url }}
+      INPUT_NAME:   ${{ github.event.inputs.rule_name }}
+      INPUT_FORMAT: ${{ github.event.inputs.rule_format || 'json' }}
+      INPUT_TYPE:   ${{ github.event.inputs.rule_type  || 'domain' }}
 
     steps:
       - name: Checkout
@@ -35,11 +55,12 @@ jobs:
       - name: Install dependencies
         run: |
           set -e
-          sudo apt-get update
+          sudo apt-get update -q
           sudo apt-get install -y jq curl wget
 
+      # ── 更新 sources.json ────────────────────────────────────────────────
       - name: Update sources.json
-        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.json_url != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.rule_url != '' }}
         run: |
           set -e
 
@@ -50,23 +71,35 @@ jobs:
 
           EXISTS=$(jq --arg n "$INPUT_NAME" 'any(.[]; .name == $n)' rules/sources.json)
 
+          build_entry() {
+            # 输出一个 jq 对象片段
+            if [ "$INPUT_FORMAT" = "yaml" ]; then
+              jq -n --arg n "$INPUT_NAME" --arg u "$INPUT_URL" \
+                    --arg fmt "$INPUT_FORMAT" --arg t "$INPUT_TYPE" \
+                '{"name":$n,"url":$u,"format":$fmt,"type":$t}'
+            else
+              jq -n --arg n "$INPUT_NAME" --arg u "$INPUT_URL" --arg fmt "$INPUT_FORMAT" \
+                '{"name":$n,"url":$u,"format":$fmt}'
+            fi
+          }
+
           if [ "$EXISTS" = "true" ]; then
-            jq --arg n "$INPUT_NAME" --arg u "$INPUT_URL" \
-              'map(if .name == $n then .url = $u else . end)' \
+            ENTRY=$(build_entry)
+            jq --arg n "$INPUT_NAME" --argjson e "$ENTRY" \
+              'map(if .name == $n then $e else . end)' \
               rules/sources.json > tmp.json
           else
-            jq --arg n "$INPUT_NAME" --arg u "$INPUT_URL" \
-              '. += [{"name": $n, "url": $u}]' \
-              rules/sources.json > tmp.json
+            ENTRY=$(build_entry)
+            jq --argjson e "$ENTRY" '. += [$e]' rules/sources.json > tmp.json
           fi
 
           mv tmp.json rules/sources.json
-          echo "Done: $INPUT_NAME -> $INPUT_URL"
+          echo "Done: $INPUT_NAME → $INPUT_URL ($INPUT_FORMAT)"
 
+      # ── 下载规则源文件 ───────────────────────────────────────────────────
       - name: Download rules
         run: |
           set -e
-
           mkdir -p rules output
 
           COUNT=$(jq 'length' rules/sources.json)
@@ -75,70 +108,87 @@ jobs:
             exit 0
           fi
 
-          jq -c '.[]' rules/sources.json | while read -r item; do
-            name=$(echo "$item" | jq -r '.name')
-            url=$(echo "$item" | jq -r '.url')
+          while IFS= read -r item; do
+            name=$(jq -r '.name'           <<< "$item")
+            url=$(jq  -r '.url'            <<< "$item")
+            fmt=$(jq  -r '.format // "json"' <<< "$item")
 
-            echo "Downloading $name"
-            curl -fsSL "$url" -o "rules/${name}.json"
-          done
+            echo "Downloading $name ($fmt)"
+            curl -fsSL "$url" -o "rules/${name}.${fmt}"
+          done < <(jq -c '.[]' rules/sources.json)
 
+      # ── 下载 sing-box ────────────────────────────────────────────────────
       - name: Download sing-box
         run: |
           set -e
-
-          VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name')
-          VERSION=${VERSION#v}
-
-          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-amd64.tar.gz"
-
+          VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+                | jq -r '.tag_name' | sed 's/^v//')
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-amd64.tar.gz"
           tar -xzf sing-box-*.tar.gz
           sudo mv sing-box-*/sing-box /usr/local/bin/
-
           sing-box version
 
+      # ── 下载 mihomo ──────────────────────────────────────────────────────
+      - name: Download mihomo
+        run: |
+          set -e
+          VER=$(curl -s https://api.github.com/repos/metacubex/mihomo/releases/latest \
+                | jq -r '.tag_name')                     # 保留 v 前缀，mihomo 用带 v 的路径
+          FILE="mihomo-linux-amd64-${VER}.gz"
+          wget -q "https://github.com/metacubex/mihomo/releases/download/${VER}/${FILE}"
+          gzip -d "$FILE"
+          sudo mv "mihomo-linux-amd64-${VER}" /usr/local/bin/mihomo
+          sudo chmod +x /usr/local/bin/mihomo
+          mihomo -v
+
+      # ── 编译 ─────────────────────────────────────────────────────────────
       - name: Compile rules
         run: |
           set -e
-
           mkdir -p output
           HAS_ERROR=0
 
-          shopt -s nullglob
-          files=(rules/*.json)
+          while IFS= read -r item; do
+            name=$(jq  -r '.name'              <<< "$item")
+            fmt=$(jq   -r '.format // "json"'  <<< "$item")
+            rtype=$(jq -r '.type   // "domain"' <<< "$item")
 
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "没有规则文件"
-            exit 0
-          fi
+            case "$fmt" in
+              json)
+                src="rules/${name}.json"
+                dst="output/${name}.srs"
+                rm -f "$dst"
+                if sing-box rule-set compile --output "$dst" "$src"; then
+                  echo "✓ ${name}.srs"
+                else
+                  echo "✗ FAILED: $name (json→srs)"
+                  HAS_ERROR=1
+                fi
+                ;;
+              yaml)
+                src="rules/${name}.yaml"
+                dst="output/${name}.mrs"
+                rm -f "$dst"
+                if mihomo convert-ruleset "$rtype" yaml "$src" "$dst"; then
+                  echo "✓ ${name}.mrs"
+                else
+                  echo "✗ FAILED: $name (yaml[$rtype]→mrs)"
+                  HAS_ERROR=1
+                fi
+                ;;
+              *)
+                echo "⚠ 未知格式: $fmt，跳过 $name"
+                ;;
+            esac
+          done < <(jq -c '.[]' rules/sources.json)
 
-          for f in "${files[@]}"; do
-            name=$(basename "$f" .json)
+          [ $HAS_ERROR -eq 0 ]
 
-            if [ "$name" = "sources" ]; then
-              continue
-            fi
-
-            dst="output/${name}.srs"
-            rm -f "$dst"
-
-            if sing-box rule-set compile --output "$dst" "$f"; then
-              echo "Compiled: ${name}.srs"
-            else
-              echo "ERROR: $name"
-              HAS_ERROR=1
-            fi
-          done
-
-          if [ $HAS_ERROR -eq 1 ]; then
-            exit 1
-          fi
-
+      # ── 提交 ─────────────────────────────────────────────────────────────
       - name: Commit changes
         run: |
           set -e
-
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add rules/ output/
