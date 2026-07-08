@@ -198,20 +198,29 @@ jobs:
               data = yaml.safe_load(f) or {}
           payload = [str(x).strip() for x in (data.get("payload") or [])]
 
-          domain_re = re.compile(r'^(DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|DOMAIN-REGEX),[^,]+$')
-          ipcidr_re = re.compile(r'^(IP-CIDR|IP-CIDR6),[^,]+(,no-resolve)?$')
+          domain_exact_re  = re.compile(r'^DOMAIN,(.+)$')
+          domain_suffix_re = re.compile(r'^DOMAIN-SUFFIX,(.+)$')
+          ipcidr_re        = re.compile(r'^(IP-CIDR|IP-CIDR6),([^,]+)(,no-resolve)?$')
+          # domain 域名系但 mrs 无法表达的类型（keyword/regex），以及其他任何不认识的类型
+          # 一律归入"保留原样、不编译"的 classical 文件
 
-          domain_lines, ip_lines, dropped = [], [], []
+          mrs_domain, mrs_ipcidr, classical_only = [], [], []
+
           for line in payload:
-              if domain_re.match(line):
-                  domain_lines.append(line)
-              elif ipcidr_re.match(line):
-                  ip_lines.append(line)
-              else:
-                  dropped.append(line)
-
-          for d in dropped:
-              print(f"::warning::[{name}] mrs 不支持该规则类型，已丢弃: {d}", file=sys.stderr)
+              m = domain_exact_re.match(line)
+              if m:
+                  mrs_domain.append(m.group(1))          # 裸域名，精确匹配
+                  continue
+              m = domain_suffix_re.match(line)
+              if m:
+                  mrs_domain.append("+." + m.group(1))    # +. 前缀 = 后缀匹配
+                  continue
+              m = ipcidr_re.match(line)
+              if m:
+                  mrs_ipcidr.append(m.group(2))           # 裸 CIDR，去掉前缀和 no-resolve
+                  continue
+              # DOMAIN-KEYWORD / DOMAIN-REGEX / IP-ASN 等：mrs 无法表达，保留原始 classical 格式
+              classical_only.append(line)
 
           def convert(lines, behavior, dst):
               if not lines:
@@ -231,26 +240,18 @@ jobs:
               return True
 
           ok = True
+          ok = convert(mrs_domain, "domain", os.path.join(outdir, f"{name}.mrs")) and ok
+          ok = convert(mrs_ipcidr, "ipcidr", os.path.join(outdir, f"{name}-ipcidr.mrs")) and ok
 
-          if rtype == "domain":
-              ok = convert(domain_lines, "domain", os.path.join(outdir, f"{name}.mrs"))
-              if ip_lines:
-                  print(f"::warning::[{name}] 声明为 domain 类型，含 {len(ip_lines)} 条 IP 规则已忽略", file=sys.stderr)
+          if classical_only:
+              cpath = os.path.join(outdir, f"{name}-classical.yaml")
+              with open(cpath, "w", encoding="utf-8") as f:
+                  yaml.safe_dump({"payload": classical_only}, f, allow_unicode=True)
+              print(f"::warning::[{name}] {len(classical_only)} 条规则 mrs 无法表达（如 DOMAIN-KEYWORD/DOMAIN-REGEX/IP-ASN），已原样保存为 {name}-classical.yaml，需以 behavior: classical, format: yaml 方式引用", file=sys.stderr)
 
-          elif rtype == "ipcidr":
-              ok = convert(ip_lines, "ipcidr", os.path.join(outdir, f"{name}.mrs"))
-              if domain_lines:
-                  print(f"::warning::[{name}] 声明为 ipcidr 类型，含 {len(domain_lines)} 条域名规则已忽略", file=sys.stderr)
-
-          else:
-              # classical：mrs 不支持混合类型，自动拆分成两个文件
-              if domain_lines:
-                  ok = convert(domain_lines, "domain", os.path.join(outdir, f"{name}.mrs")) and ok
-              if ip_lines:
-                  ok = convert(ip_lines, "ipcidr", os.path.join(outdir, f"{name}-ipcidr.mrs")) and ok
-              if not domain_lines and not ip_lines:
-                  print(f"::error::[{name}] 过滤后无有效规则", file=sys.stderr)
-                  ok = False
+          if not mrs_domain and not mrs_ipcidr and not classical_only:
+              print(f"::error::[{name}] 无有效规则", file=sys.stderr)
+              ok = False
 
           sys.exit(0 if ok else 1)
           PYEOF
@@ -273,12 +274,12 @@ jobs:
                 fi
                 ;;
               yaml)
-                echo "Compiling $name.yaml [$rtype] ..."
-                rm -f "output/${name}.mrs" "output/${name}-ipcidr.mrs"
+                echo "Compiling $name.yaml ..."
+                rm -f "output/${name}.mrs" "output/${name}-ipcidr.mrs" "output/${name}-classical.yaml"
                 if python3 compile_yaml.py "$name" "rules/${name}.yaml" "$rtype" "output"; then
                   :
                 else
-                  echo "✗ FAILED: $name (yaml[$rtype]→mrs)"
+                  echo "✗ FAILED: $name (yaml→mrs)"
                   HAS_ERROR=1
                 fi
                 ;;
