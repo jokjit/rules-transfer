@@ -9,5 +9,11 @@
     "url": "https://raw.githubusercontent.com/zrj866/mihomo/main/TelegramSG.yaml",
     "format": "yaml",
     "type": "ipcidr"
+  },
+  {
+    "name": "telegramUS",
+    "url": "https://raw.githubusercontent.com/zrj866/mihomo/main/TelegramUS.yaml",
+    "format": "yaml",
+    "type": "classical"
   }
 ]

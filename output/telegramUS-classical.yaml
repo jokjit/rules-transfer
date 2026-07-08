@@ -1,0 +1,4 @@
+payload:
+- DOMAIN-KEYWORD,nicegram
+- DOMAIN-KEYWORD,telegram
+- IP-ASN,59930,no-resolve
