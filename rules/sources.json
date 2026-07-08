@@ -15,5 +15,11 @@
     "url": "https://raw.githubusercontent.com/zrj866/mihomo/main/TelegramUS.yaml",
     "format": "yaml",
     "type": "classical"
+  },
+  {
+    "name": "telegramNL",
+    "url": "https://raw.githubusercontent.com/zrj866/mihomo/main/TelegramNL.yaml",
+    "format": "yaml",
+    "type": "classical"
   }
 ]
