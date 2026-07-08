@@ -189,39 +189,70 @@ jobs:
           mkdir -p output
           HAS_ERROR=0
 
-          # 过滤掉 mrs 转换器不支持、会导致 panic 的规则类型
-          cat > sanitize_yaml.py <<'PYEOF'
-          import sys, re, yaml
+          cat > compile_yaml.py <<'PYEOF'
+          import sys, re, os, subprocess, yaml
 
-          path = sys.argv[1]
-          with open(path, "r", encoding="utf-8") as f:
+          name, src, rtype, outdir = sys.argv[1:5]
+
+          with open(src, "r", encoding="utf-8") as f:
               data = yaml.safe_load(f) or {}
+          payload = [str(x).strip() for x in (data.get("payload") or [])]
 
-          payload = data.get("payload") or []
+          domain_re = re.compile(r'^(DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|DOMAIN-REGEX),[^,]+$')
+          ipcidr_re = re.compile(r'^(IP-CIDR|IP-CIDR6),[^,]+(,no-resolve)?$')
 
-          allowed = re.compile(
-              r'^(DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|DOMAIN-REGEX),[^,]+$'
-              r'|^(IP-CIDR|IP-CIDR6),[^,]+(,no-resolve)?$'
-          )
-
-          kept, dropped = [], []
+          domain_lines, ip_lines, dropped = [], [], []
           for line in payload:
-              s = str(line).strip()
-              if allowed.match(s):
-                  kept.append(s)
+              if domain_re.match(line):
+                  domain_lines.append(line)
+              elif ipcidr_re.match(line):
+                  ip_lines.append(line)
               else:
-                  dropped.append(s)
+                  dropped.append(line)
 
           for d in dropped:
-              print(f"::warning::丢弃不支持的规则行: {d}", file=sys.stderr)
+              print(f"::warning::[{name}] mrs 不支持该规则类型，已丢弃: {d}", file=sys.stderr)
 
-          with open(path, "w", encoding="utf-8") as f:
-              yaml.safe_dump({"payload": kept}, f, allow_unicode=True)
+          def convert(lines, behavior, dst):
+              if not lines:
+                  return True
+              tmp_yaml = dst + ".src.yaml"
+              with open(tmp_yaml, "w", encoding="utf-8") as f:
+                  yaml.safe_dump({"payload": lines}, f, allow_unicode=True)
+              r = subprocess.run(
+                  ["mihomo", "convert-ruleset", behavior, "yaml", tmp_yaml, dst],
+                  capture_output=True, text=True
+              )
+              os.remove(tmp_yaml)
+              if r.returncode != 0:
+                  print(f"::error::[{name}] 转换({behavior}) 失败: {r.stderr.strip()[:300]}", file=sys.stderr)
+                  return False
+              print(f"✓ {os.path.basename(dst)} ({len(lines)} 条)", file=sys.stderr)
+              return True
 
-          print(f"kept={len(kept)} dropped={len(dropped)}", file=sys.stderr)
-          if len(kept) == 0:
-              print("::error::过滤后规则列表为空", file=sys.stderr)
-              sys.exit(1)
+          ok = True
+
+          if rtype == "domain":
+              ok = convert(domain_lines, "domain", os.path.join(outdir, f"{name}.mrs"))
+              if ip_lines:
+                  print(f"::warning::[{name}] 声明为 domain 类型，含 {len(ip_lines)} 条 IP 规则已忽略", file=sys.stderr)
+
+          elif rtype == "ipcidr":
+              ok = convert(ip_lines, "ipcidr", os.path.join(outdir, f"{name}.mrs"))
+              if domain_lines:
+                  print(f"::warning::[{name}] 声明为 ipcidr 类型，含 {len(domain_lines)} 条域名规则已忽略", file=sys.stderr)
+
+          else:
+              # classical：mrs 不支持混合类型，自动拆分成两个文件
+              if domain_lines:
+                  ok = convert(domain_lines, "domain", os.path.join(outdir, f"{name}.mrs")) and ok
+              if ip_lines:
+                  ok = convert(ip_lines, "ipcidr", os.path.join(outdir, f"{name}-ipcidr.mrs")) and ok
+              if not domain_lines and not ip_lines:
+                  print(f"::error::[{name}] 过滤后无有效规则", file=sys.stderr)
+                  ok = False
+
+          sys.exit(0 if ok else 1)
           PYEOF
 
           while IFS= read -r item; do
@@ -242,19 +273,10 @@ jobs:
                 fi
                 ;;
               yaml)
-                src="rules/${name}.yaml"
-                dst="output/${name}.mrs"
-                rm -f "$dst"
-
-                echo "Sanitizing $name.yaml ..."
-                if ! python3 sanitize_yaml.py "$src"; then
-                  echo "✗ FAILED: $name (sanitize)"
-                  HAS_ERROR=1
-                  continue
-                fi
-
-                if mihomo convert-ruleset "$rtype" yaml "$src" "$dst"; then
-                  echo "✓ ${name}.mrs"
+                echo "Compiling $name.yaml [$rtype] ..."
+                rm -f "output/${name}.mrs" "output/${name}-ipcidr.mrs"
+                if python3 compile_yaml.py "$name" "rules/${name}.yaml" "$rtype" "output"; then
+                  :
                 else
                   echo "✗ FAILED: $name (yaml[$rtype]→mrs)"
                   HAS_ERROR=1
@@ -267,7 +289,6 @@ jobs:
           done < <(jq -c '.[]' rules/sources.json)
 
           [ $HAS_ERROR -eq 0 ]
-
       # ── 提交 ─────────────────────────────────────────────────────────────
       - name: Commit changes
         if: always()
