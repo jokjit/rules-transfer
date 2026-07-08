@@ -56,7 +56,7 @@ jobs:
         run: |
           set -e
           sudo apt-get update -q
-          sudo apt-get install -y jq curl wget
+          sudo apt-get install -y jq curl wget python3-yaml
 
       # ── 更新 sources.json ────────────────────────────────────────────────
       - name: Update sources.json
@@ -189,6 +189,41 @@ jobs:
           mkdir -p output
           HAS_ERROR=0
 
+          # 过滤掉 mrs 转换器不支持、会导致 panic 的规则类型
+          cat > sanitize_yaml.py <<'PYEOF'
+          import sys, re, yaml
+
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8") as f:
+              data = yaml.safe_load(f) or {}
+
+          payload = data.get("payload") or []
+
+          allowed = re.compile(
+              r'^(DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|DOMAIN-REGEX),[^,]+$'
+              r'|^(IP-CIDR|IP-CIDR6),[^,]+(,no-resolve)?$'
+          )
+
+          kept, dropped = [], []
+          for line in payload:
+              s = str(line).strip()
+              if allowed.match(s):
+                  kept.append(s)
+              else:
+                  dropped.append(s)
+
+          for d in dropped:
+              print(f"::warning::丢弃不支持的规则行: {d}", file=sys.stderr)
+
+          with open(path, "w", encoding="utf-8") as f:
+              yaml.safe_dump({"payload": kept}, f, allow_unicode=True)
+
+          print(f"kept={len(kept)} dropped={len(dropped)}", file=sys.stderr)
+          if len(kept) == 0:
+              print("::error::过滤后规则列表为空", file=sys.stderr)
+              sys.exit(1)
+          PYEOF
+
           while IFS= read -r item; do
             name=$(jq  -r '.name'              <<< "$item")
             fmt=$(jq   -r '.format // "json"'  <<< "$item")
@@ -210,6 +245,14 @@ jobs:
                 src="rules/${name}.yaml"
                 dst="output/${name}.mrs"
                 rm -f "$dst"
+
+                echo "Sanitizing $name.yaml ..."
+                if ! python3 sanitize_yaml.py "$src"; then
+                  echo "✗ FAILED: $name (sanitize)"
+                  HAS_ERROR=1
+                  continue
+                fi
+
                 if mihomo convert-ruleset "$rtype" yaml "$src" "$dst"; then
                   echo "✓ ${name}.mrs"
                 else
