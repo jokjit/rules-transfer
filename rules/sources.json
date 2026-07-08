@@ -3,5 +3,11 @@
     "name": "awavenue",
     "url": "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/refs/heads/main/Filters/AWAvenue-Ads-Rule-Singbox.json",
     "format": "json"
+  },
+  {
+    "name": "telegramSG",
+    "url": "https://raw.githubusercontent.com/zrj866/mihomo/main/TelegramSG.yaml",
+    "format": "yaml",
+    "type": "classical"
   }
 ]
