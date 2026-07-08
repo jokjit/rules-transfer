@@ -8,6 +8,6 @@
     "name": "telegramSG",
     "url": "https://raw.githubusercontent.com/zrj866/mihomo/main/TelegramSG.yaml",
     "format": "yaml",
-    "type": "classical"
+    "type": "ipcidr"
   }
 ]
