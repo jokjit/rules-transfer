@@ -7,10 +7,12 @@ on:
         description: "可选 新规则链接（JSON/YAML）"
         required: false
         type: string
+
       rule_name:
         description: "可选 规则名称（不含扩展名）"
         required: false
         type: string
+
       rule_format:
         description: "规则格式（json→srs / yaml→mrs）"
         required: false
@@ -19,6 +21,7 @@ on:
         options:
           - json
           - yaml
+
       rule_type:
         description: "YAML 规则类型（仅 yaml 时有效）"
         required: false
@@ -28,12 +31,13 @@ on:
           - domain
           - ipcidr
           - classical
+
   schedule:
     - cron: "0 0 * * *"
+
   push:
     paths:
-      - "rules/**.json"
-      - "rules/**.yaml"
+      - "rules/**"
 
 permissions:
   contents: write
@@ -41,12 +45,13 @@ permissions:
 jobs:
   compile:
     runs-on: ubuntu-latest
+
     env:
       EVENT_NAME: ${{ github.event_name }}
-      INPUT_URL:    ${{ github.event.inputs.rule_url }}
-      INPUT_NAME:   ${{ github.event.inputs.rule_name }}
+      INPUT_URL: ${{ github.event.inputs.rule_url }}
+      INPUT_NAME: ${{ github.event.inputs.rule_name }}
       INPUT_FORMAT: ${{ github.event.inputs.rule_format || 'json' }}
-      INPUT_TYPE:   ${{ github.event.inputs.rule_type  || 'domain' }}
+      INPUT_TYPE: ${{ github.event.inputs.rule_type || 'domain' }}
 
     steps:
       - name: Checkout
@@ -55,23 +60,32 @@ jobs:
       - name: Install dependencies
         run: |
           set -e
+
           sudo apt-get update -q
           sudo apt-get install -y jq curl wget python3-yaml
 
-      # ── 更新 sources.json ────────────────────────────────────────────────
+          mkdir -p rules output
+
+      # ---------------------------------------------------------------------
+      # 更新 rules/sources.json
+      # ---------------------------------------------------------------------
       - name: Update sources.json
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.rule_url != '' }}
         run: |
           set -e
+
+          if [ ! -f "rules/sources.json" ]; then
+            echo "[]" > rules/sources.json
+          fi
 
           if [ -z "$INPUT_NAME" ]; then
             echo "::error::请同时填写规则名称"
             exit 1
           fi
 
-          # 将 GitHub 网页 blob/raw 链接自动归一化为 raw 直链
           normalize_url() {
             local url="$1"
+
             if [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/blob/(.+)$ ]]; then
               echo "https://raw.githubusercontent.com/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
             elif [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/raw/(.+)$ ]]; then
@@ -81,44 +95,75 @@ jobs:
             fi
           }
 
-          INPUT_URL=$(normalize_url "$INPUT_URL")
-          echo "Normalized URL: $INPUT_URL"
+          INPUT_URL="$(normalize_url "$INPUT_URL")"
 
-          EXISTS=$(jq --arg n "$INPUT_NAME" 'any(.[]; .name == $n)' rules/sources.json)
+          echo "规则名称: $INPUT_NAME"
+          echo "规则地址: $INPUT_URL"
+          echo "规则格式: $INPUT_FORMAT"
 
           build_entry() {
-            # 输出一个 jq 对象片段
             if [ "$INPUT_FORMAT" = "yaml" ]; then
-              jq -n --arg n "$INPUT_NAME" --arg u "$INPUT_URL" \
-                    --arg fmt "$INPUT_FORMAT" --arg t "$INPUT_TYPE" \
-                '{"name":$n,"url":$u,"format":$fmt,"type":$t}'
+              jq -n \
+                --arg n "$INPUT_NAME" \
+                --arg u "$INPUT_URL" \
+                --arg fmt "$INPUT_FORMAT" \
+                --arg t "$INPUT_TYPE" \
+                '{
+                  name: $n,
+                  url: $u,
+                  format: $fmt,
+                  type: $t
+                }'
             else
-              jq -n --arg n "$INPUT_NAME" --arg u "$INPUT_URL" --arg fmt "$INPUT_FORMAT" \
-                '{"name":$n,"url":$u,"format":$fmt}'
+              jq -n \
+                --arg n "$INPUT_NAME" \
+                --arg u "$INPUT_URL" \
+                --arg fmt "$INPUT_FORMAT" \
+                '{
+                  name: $n,
+                  url: $u,
+                  format: $fmt
+                }'
             fi
           }
 
+          ENTRY="$(build_entry)"
+          EXISTS="$(jq --arg n "$INPUT_NAME" 'any(.[]; .name == $n)' rules/sources.json)"
+
           if [ "$EXISTS" = "true" ]; then
-            ENTRY=$(build_entry)
-            jq --arg n "$INPUT_NAME" --argjson e "$ENTRY" \
+            jq \
+              --arg n "$INPUT_NAME" \
+              --argjson e "$ENTRY" \
               'map(if .name == $n then $e else . end)' \
-              rules/sources.json > tmp.json
+              rules/sources.json > rules/sources.json.tmp
           else
-            ENTRY=$(build_entry)
-            jq --argjson e "$ENTRY" '. += [$e]' rules/sources.json > tmp.json
+            jq \
+              --argjson e "$ENTRY" \
+              '. += [$e]' \
+              rules/sources.json > rules/sources.json.tmp
           fi
 
-          mv tmp.json rules/sources.json
-          echo "Done: $INPUT_NAME → $INPUT_URL ($INPUT_FORMAT)"
+          mv rules/sources.json.tmp rules/sources.json
 
-      # ── 下载规则源文件 ───────────────────────────────────────────────────
+          echo "sources.json 更新完成"
+
+      # ---------------------------------------------------------------------
+      # 下载 sources.json 中登记的远程规则
+      # ---------------------------------------------------------------------
       - name: Download rules
         run: |
           set -e
+
           mkdir -p rules output
+
+          if [ ! -f "rules/sources.json" ]; then
+            echo "rules/sources.json 不存在，跳过远程规则下载"
+            exit 0
+          fi
 
           normalize_url() {
             local url="$1"
+
             if [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/blob/(.+)$ ]]; then
               echo "https://raw.githubusercontent.com/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
             elif [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/raw/(.+)$ ]]; then
@@ -128,180 +173,382 @@ jobs:
             fi
           }
 
-          COUNT=$(jq 'length' rules/sources.json)
+          COUNT="$(jq 'length' rules/sources.json)"
+
           if [ "$COUNT" -eq 0 ]; then
-            echo "sources.json 为空，跳过"
+            echo "sources.json 为空，跳过远程规则下载"
             exit 0
           fi
 
           while IFS= read -r item; do
-            name=$(jq -r '.name'             <<< "$item")
-            url=$(jq  -r '.url'              <<< "$item")
-            fmt=$(jq  -r '.format // "json"' <<< "$item")
+            name="$(jq -r '.name' <<< "$item")"
+            url="$(jq -r '.url' <<< "$item")"
+            fmt="$(jq -r '.format // "json"' <<< "$item")"
 
-            url=$(normalize_url "$url")
-            echo "Downloading $name ($fmt) from $url"
+            case "$fmt" in
+              json|yaml|yml)
+                ;;
+              *)
+                echo "::warning::跳过未知格式: $name ($fmt)"
+                continue
+                ;;
+            esac
 
-            if ! curl -fsSL "$url" -o "rules/${name}.${fmt}"; then
+            url="$(normalize_url "$url")"
+
+            echo "正在下载: $name.$fmt"
+            echo "地址: $url"
+
+            if ! curl -fsSL --retry 3 --connect-timeout 20 --max-time 120 \
+              "$url" -o "rules/${name}.${fmt}"; then
               echo "::warning::下载失败: $name ($url)"
               continue
             fi
 
-            # 校验：文件是否为空，或误下载成了 HTML 页面
             if [ ! -s "rules/${name}.${fmt}" ]; then
-              echo "::error::$name 下载结果为空文件: $url"
+              echo "::error::$name 下载结果为空文件"
               exit 1
             fi
-            if head -c 200 "rules/${name}.${fmt}" | grep -qi "<!DOCTYPE html>"; then
-              echo "::error::$name 下载到的是 HTML 页面而非规则内容，链接可能不是 raw 直链: $url"
+
+            if head -c 500 "rules/${name}.${fmt}" | grep -Eiq \
+              '<!DOCTYPE html|<html|<head|access denied|404: not found'; then
+              echo "::error::$name 下载到的是网页，而不是规则文件"
+              echo "::error::请检查是否使用 raw 链接: $url"
               exit 1
             fi
+
+            echo "下载完成: rules/${name}.${fmt}"
           done < <(jq -c '.[]' rules/sources.json)
 
-      # ── 下载 sing-box ────────────────────────────────────────────────────
+      # ---------------------------------------------------------------------
+      # 下载 sing-box
+      # ---------------------------------------------------------------------
       - name: Download sing-box
         run: |
           set -e
-          VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-                | jq -r '.tag_name' | sed 's/^v//')
-          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-amd64.tar.gz"
-          tar -xzf sing-box-*.tar.gz
-          sudo mv sing-box-*/sing-box /usr/local/bin/
+
+          VER="$(
+            curl -fsSL \
+              https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+              | jq -r '.tag_name' \
+              | sed 's/^v//'
+          )"
+
+          if [ -z "$VER" ] || [ "$VER" = "null" ]; then
+            echo "::error::无法获取 sing-box 最新版本"
+            exit 1
+          fi
+
+          echo "sing-box version: $VER"
+
+          ARCHIVE="sing-box-${VER}-linux-amd64.tar.gz"
+          URL="https://github.com/SagerNet/sing-box/releases/download/v${VER}/${ARCHIVE}"
+
+          wget -q --show-progress "$URL"
+
+          tar -xzf "$ARCHIVE"
+
+          sudo install -m 0755 \
+            "sing-box-${VER}/sing-box" \
+            /usr/local/bin/sing-box
+
           sing-box version
 
-      # ── 下载 mihomo ──────────────────────────────────────────────────────
+      # ---------------------------------------------------------------------
+      # 下载 mihomo
+      # ---------------------------------------------------------------------
       - name: Download mihomo
         run: |
           set -e
-          VER=$(curl -s https://api.github.com/repos/metacubex/mihomo/releases/latest \
-                | jq -r '.tag_name')                     # 保留 v 前缀，mihomo 用带 v 的路径
+
+          VER="$(
+            curl -fsSL \
+              https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
+              | jq -r '.tag_name'
+          )"
+
+          if [ -z "$VER" ] || [ "$VER" = "null" ]; then
+            echo "::error::无法获取 mihomo 最新版本"
+            exit 1
+          fi
+
+          echo "mihomo version: $VER"
+
           FILE="mihomo-linux-amd64-${VER}.gz"
-          wget -q "https://github.com/metacubex/mihomo/releases/download/${VER}/${FILE}"
+          URL="https://github.com/MetaCubeX/mihomo/releases/download/${VER}/${FILE}"
+
+          wget -q --show-progress "$URL"
+
           gzip -d "$FILE"
-          sudo mv "mihomo-linux-amd64-${VER}" /usr/local/bin/mihomo
-          sudo chmod +x /usr/local/bin/mihomo
+
+          sudo install -m 0755 \
+            "mihomo-linux-amd64-${VER}" \
+            /usr/local/bin/mihomo
+
           mihomo -v
 
-      # ── 编译 ─────────────────────────────────────────────────────────────
+      # ---------------------------------------------------------------------
+      # 编译规则
+      # ---------------------------------------------------------------------
       - name: Compile rules
         run: |
           set -e
+
           mkdir -p output
+
           HAS_ERROR=0
 
           cat > compile_yaml.py <<'PYEOF'
-          import sys, re, os, subprocess, yaml
+          import os
+          import re
+          import subprocess
+          import sys
+          import yaml
 
-          name, src, rtype, outdir = sys.argv[1:5]
+          name, src, requested_type, outdir = sys.argv[1:5]
 
           with open(src, "r", encoding="utf-8") as f:
               data = yaml.safe_load(f) or {}
-          payload = [str(x).strip() for x in (data.get("payload") or [])]
 
-          domain_exact_re  = re.compile(r'^DOMAIN,(.+)$')
-          domain_suffix_re = re.compile(r'^DOMAIN-SUFFIX,(.+)$')
-          ipcidr_re        = re.compile(r'^(IP-CIDR|IP-CIDR6),([^,]+)(,no-resolve)?$')
-          # domain 域名系但 mrs 无法表达的类型（keyword/regex），以及其他任何不认识的类型
-          # 一律归入"保留原样、不编译"的 classical 文件
+          if isinstance(data, dict):
+              payload = data.get("payload") or []
+          elif isinstance(data, list):
+              payload = data
+          else:
+              payload = []
 
-          mrs_domain, mrs_ipcidr, classical_only = [], [], []
+          payload = [
+              str(item).strip()
+              for item in payload
+              if str(item).strip()
+          ]
+
+          domain_exact_re = re.compile(
+              r"^DOMAIN,([^,]+)$",
+              re.IGNORECASE
+          )
+
+          domain_suffix_re = re.compile(
+              r"^DOMAIN-SUFFIX,([^,]+)$",
+              re.IGNORECASE
+          )
+
+          ipcidr_re = re.compile(
+              r"^(IP-CIDR|IP-CIDR6),([^,]+)(,no-resolve)?$",
+              re.IGNORECASE
+          )
+
+          mrs_domain = []
+          mrs_ipcidr = []
+          classical_only = []
 
           for line in payload:
-              m = domain_exact_re.match(line)
-              if m:
-                  mrs_domain.append(m.group(1))          # 裸域名，精确匹配
+              match = domain_exact_re.match(line)
+
+              if match:
+                  mrs_domain.append(match.group(1))
                   continue
-              m = domain_suffix_re.match(line)
-              if m:
-                  mrs_domain.append("+." + m.group(1))    # +. 前缀 = 后缀匹配
+
+              match = domain_suffix_re.match(line)
+
+              if match:
+                  mrs_domain.append("+." + match.group(1))
                   continue
-              m = ipcidr_re.match(line)
-              if m:
-                  mrs_ipcidr.append(m.group(2))           # 裸 CIDR，去掉前缀和 no-resolve
+
+              match = ipcidr_re.match(line)
+
+              if match:
+                  mrs_ipcidr.append(match.group(2))
                   continue
-              # DOMAIN-KEYWORD / DOMAIN-REGEX / IP-ASN 等：mrs 无法表达，保留原始 classical 格式
+
+              # DOMAIN-KEYWORD、DOMAIN-REGEX、IP-ASN 等规则
+              # 无法表达为 mihomo domain/ipcidr MRS，保留为 classical YAML。
               classical_only.append(line)
 
-          def convert(lines, behavior, dst):
+          def convert(lines, behavior, destination):
               if not lines:
                   return True
-              tmp_yaml = dst + ".src.yaml"
-              with open(tmp_yaml, "w", encoding="utf-8") as f:
-                  yaml.safe_dump({"payload": lines}, f, allow_unicode=True)
-              r = subprocess.run(
-                  ["mihomo", "convert-ruleset", behavior, "yaml", tmp_yaml, dst],
-                  capture_output=True, text=True
+
+              temp_yaml = destination + ".source.yaml"
+
+              with open(temp_yaml, "w", encoding="utf-8") as f:
+                  yaml.safe_dump(
+                      {"payload": lines},
+                      f,
+                      allow_unicode=True,
+                      sort_keys=False
+                  )
+
+              result = subprocess.run(
+                  [
+                      "mihomo",
+                      "convert-ruleset",
+                      behavior,
+                      "yaml",
+                      temp_yaml,
+                      destination
+                  ],
+                  capture_output=True,
+                  text=True
               )
-              os.remove(tmp_yaml)
-              if r.returncode != 0:
-                  print(f"::error::[{name}] 转换({behavior}) 失败: {r.stderr.strip()[:300]}", file=sys.stderr)
+
+              try:
+                  os.remove(temp_yaml)
+              except OSError:
+                  pass
+
+              if result.returncode != 0:
+                  error = result.stderr.strip()[:500]
+                  print(
+                      f"::error::[{name}] "
+                      f"{behavior} MRS 转换失败: {error}",
+                      file=sys.stderr
+                  )
                   return False
-              print(f"✓ {os.path.basename(dst)} ({len(lines)} 条)", file=sys.stderr)
+
+              print(
+                  f"已生成 {os.path.basename(destination)} "
+                  f"({len(lines)} 条)"
+              )
+
               return True
 
           ok = True
-          ok = convert(mrs_domain, "domain", os.path.join(outdir, f"{name}.mrs")) and ok
-          ok = convert(mrs_ipcidr, "ipcidr", os.path.join(outdir, f"{name}-ipcidr.mrs")) and ok
+
+          if mrs_domain:
+              domain_path = os.path.join(outdir, f"{name}.mrs")
+              ok = convert(
+                  mrs_domain,
+                  "domain",
+                  domain_path
+              ) and ok
+
+          if mrs_ipcidr:
+              ipcidr_path = os.path.join(outdir, f"{name}-ipcidr.mrs")
+              ok = convert(
+                  mrs_ipcidr,
+                  "ipcidr",
+                  ipcidr_path
+              ) and ok
 
           if classical_only:
-              cpath = os.path.join(outdir, f"{name}-classical.yaml")
-              with open(cpath, "w", encoding="utf-8") as f:
-                  yaml.safe_dump({"payload": classical_only}, f, allow_unicode=True)
-              print(f"::warning::[{name}] {len(classical_only)} 条规则 mrs 无法表达（如 DOMAIN-KEYWORD/DOMAIN-REGEX/IP-ASN），已原样保存为 {name}-classical.yaml，需以 behavior: classical, format: yaml 方式引用", file=sys.stderr)
+              classical_path = os.path.join(
+                  outdir,
+                  f"{name}-classical.yaml"
+              )
+
+              with open(classical_path, "w", encoding="utf-8") as f:
+                  yaml.safe_dump(
+                      {"payload": classical_only},
+                      f,
+                      allow_unicode=True,
+                      sort_keys=False
+                  )
+
+              print(
+                  f"::warning::[{name}] "
+                  f"{len(classical_only)} 条规则无法转换为 MRS，"
+                  f"已保存为 {name}-classical.yaml"
+              )
 
           if not mrs_domain and not mrs_ipcidr and not classical_only:
-              print(f"::error::[{name}] 无有效规则", file=sys.stderr)
+              print(
+                  f"::error::[{name}] 没有找到有效规则",
+                  file=sys.stderr
+              )
               ok = False
 
           sys.exit(0 if ok else 1)
           PYEOF
 
-          while IFS= read -r item; do
-            name=$(jq  -r '.name'              <<< "$item")
-            fmt=$(jq   -r '.format // "json"'  <<< "$item")
-            rtype=$(jq -r '.type   // "domain"' <<< "$item")
+          echo "开始扫描 rules/ 目录中的本地规则文件"
 
-            case "$fmt" in
+          while IFS= read -r -d '' src; do
+            filename="$(basename "$src")"
+            extension="${filename##*.}"
+            name="${filename%.*}"
+
+            case "$extension" in
               json)
-                src="rules/${name}.json"
-                dst="output/${name}.srs"
-                rm -f "$dst"
-                if sing-box rule-set compile --output "$dst" "$src"; then
-                  echo "✓ ${name}.srs"
+                destination="output/${name}.srs"
+
+                echo "正在编译 JSON: ${filename}"
+
+                rm -f "$destination"
+
+                if sing-box rule-set compile \
+                  --output "$destination" \
+                  "$src"; then
+                  echo "编译成功: ${destination}"
                 else
-                  echo "✗ FAILED: $name (json→srs)"
+                  echo "::error::JSON 编译失败: ${filename}"
                   HAS_ERROR=1
                 fi
                 ;;
-              yaml)
-                echo "Compiling $name.yaml ..."
-                rm -f "output/${name}.mrs" "output/${name}-ipcidr.mrs" "output/${name}-classical.yaml"
-                if python3 compile_yaml.py "$name" "rules/${name}.yaml" "$rtype" "output"; then
-                  :
+
+              yaml|yml)
+                echo "正在编译 YAML: ${filename}"
+
+                rm -f \
+                  "output/${name}.mrs" \
+                  "output/${name}-ipcidr.mrs" \
+                  "output/${name}-classical.yaml"
+
+                if python3 compile_yaml.py \
+                  "$name" \
+                  "$src" \
+                  "domain" \
+                  "output"; then
+                  echo "编译成功: ${filename}"
                 else
-                  echo "✗ FAILED: $name (yaml→mrs)"
+                  echo "::error::YAML 编译失败: ${filename}"
                   HAS_ERROR=1
                 fi
                 ;;
+
               *)
-                echo "⚠ 未知格式: $fmt，跳过 $name"
+                echo "跳过不支持的文件: ${filename}"
                 ;;
             esac
-          done < <(jq -c '.[]' rules/sources.json)
+          done < <(
+            find rules \
+              -maxdepth 1 \
+              -type f \
+              \( \
+                -name "*.json" \
+                -o -name "*.yaml" \
+                -o -name "*.yml" \
+              \) \
+              -print0 \
+              | sort -z
+          )
 
-          [ $HAS_ERROR -eq 0 ]
-      # ── 提交 ─────────────────────────────────────────────────────────────
+          echo
+          echo "当前生成的文件:"
+          find output -maxdepth 1 -type f -print | sort || true
+
+          if [ "$HAS_ERROR" -ne 0 ]; then
+            echo "::error::至少有一个规则文件编译失败"
+            exit 1
+          fi
+
+          echo "全部规则编译完成"
+
+      # ---------------------------------------------------------------------
+      # 提交编译结果
+      # ---------------------------------------------------------------------
       - name: Commit changes
         if: always()
         run: |
           set -e
-          git config user.name  "github-actions[bot]"
+
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add rules/ output/
+          git add -A rules/ output/
 
           if git diff --cached --quiet; then
-            echo "Nothing to commit"
+            echo "没有需要提交的修改"
             exit 0
           fi
 
