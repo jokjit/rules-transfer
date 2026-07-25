@@ -62,7 +62,13 @@ jobs:
           set -e
 
           sudo apt-get update -q
-          sudo apt-get install -y jq curl wget python3-yaml
+
+          sudo apt-get install -y \
+            jq \
+            curl \
+            wget \
+            git \
+            python3-yaml
 
           mkdir -p rules output
 
@@ -100,6 +106,7 @@ jobs:
           echo "规则名称: $INPUT_NAME"
           echo "规则地址: $INPUT_URL"
           echo "规则格式: $INPUT_FORMAT"
+          echo "规则类型: $INPUT_TYPE"
 
           build_entry() {
             if [ "$INPUT_FORMAT" = "yaml" ]; then
@@ -128,19 +135,26 @@ jobs:
           }
 
           ENTRY="$(build_entry)"
-          EXISTS="$(jq --arg n "$INPUT_NAME" 'any(.[]; .name == $n)' rules/sources.json)"
+
+          EXISTS="$(
+            jq --arg n "$INPUT_NAME" \
+              'any(.[]; .name == $n)' \
+              rules/sources.json
+          )"
 
           if [ "$EXISTS" = "true" ]; then
             jq \
               --arg n "$INPUT_NAME" \
               --argjson e "$ENTRY" \
               'map(if .name == $n then $e else . end)' \
-              rules/sources.json > rules/sources.json.tmp
+              rules/sources.json \
+              > rules/sources.json.tmp
           else
             jq \
               --argjson e "$ENTRY" \
               '. += [$e]' \
-              rules/sources.json > rules/sources.json.tmp
+              rules/sources.json \
+              > rules/sources.json.tmp
           fi
 
           mv rules/sources.json.tmp rules/sources.json
@@ -196,11 +210,15 @@ jobs:
 
             url="$(normalize_url "$url")"
 
-            echo "正在下载: $name.$fmt"
+            echo "正在下载: rules/${name}.${fmt}"
             echo "地址: $url"
 
-            if ! curl -fsSL --retry 3 --connect-timeout 20 --max-time 120 \
-              "$url" -o "rules/${name}.${fmt}"; then
+            if ! curl -fsSL \
+              --retry 3 \
+              --connect-timeout 20 \
+              --max-time 120 \
+              "$url" \
+              -o "rules/${name}.${fmt}"; then
               echo "::warning::下载失败: $name ($url)"
               continue
             fi
@@ -221,32 +239,60 @@ jobs:
           done < <(jq -c '.[]' rules/sources.json)
 
       # ---------------------------------------------------------------------
-      # 下载 sing-box
+      # 获取并下载 sing-box
       # ---------------------------------------------------------------------
       - name: Download sing-box
         run: |
           set -e
 
-          VER="$(
-            curl -fsSL \
-              https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-              | jq -r '.tag_name' \
-              | sed 's/^v//'
-          )"
+          get_latest_stable_tag() {
+            local repo="$1"
 
-          if [ -z "$VER" ] || [ "$VER" = "null" ]; then
-            echo "::error::无法获取 sing-box 最新版本"
+            git ls-remote --tags --refs \
+              "https://github.com/${repo}.git" \
+              | sed 's#^.*/##' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V \
+              | tail -n 1
+          }
+
+          TAG="$(get_latest_stable_tag "SagerNet/sing-box")"
+
+          if [ -z "$TAG" ]; then
+            echo "::error::无法获取 sing-box 最新稳定版本"
             exit 1
           fi
 
+          VER="${TAG#v}"
+
+          echo "sing-box tag: $TAG"
           echo "sing-box version: $VER"
 
           ARCHIVE="sing-box-${VER}-linux-amd64.tar.gz"
-          URL="https://github.com/SagerNet/sing-box/releases/download/v${VER}/${ARCHIVE}"
+          URL="https://github.com/SagerNet/sing-box/releases/download/${TAG}/${ARCHIVE}"
 
-          wget -q --show-progress "$URL"
+          rm -f "$ARCHIVE"
+          rm -rf "sing-box-${VER}"
+
+          curl -fL \
+            --retry 3 \
+            --connect-timeout 30 \
+            --max-time 180 \
+            -o "$ARCHIVE" \
+            "$URL"
+
+          if [ ! -s "$ARCHIVE" ]; then
+            echo "::error::sing-box 下载结果为空"
+            exit 1
+          fi
 
           tar -xzf "$ARCHIVE"
+
+          if [ ! -f "sing-box-${VER}/sing-box" ]; then
+            echo "::error::sing-box 解压后未找到可执行文件"
+            find . -maxdepth 3 -type f -print
+            exit 1
+          fi
 
           sudo install -m 0755 \
             "sing-box-${VER}/sing-box" \
@@ -255,34 +301,60 @@ jobs:
           sing-box version
 
       # ---------------------------------------------------------------------
-      # 下载 mihomo
+      # 获取并下载 mihomo
       # ---------------------------------------------------------------------
       - name: Download mihomo
         run: |
           set -e
 
-          VER="$(
-            curl -fsSL \
-              https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
-              | jq -r '.tag_name'
-          )"
+          get_latest_stable_tag() {
+            local repo="$1"
 
-          if [ -z "$VER" ] || [ "$VER" = "null" ]; then
-            echo "::error::无法获取 mihomo 最新版本"
+            git ls-remote --tags --refs \
+              "https://github.com/${repo}.git" \
+              | sed 's#^.*/##' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V \
+              | tail -n 1
+          }
+
+          TAG="$(get_latest_stable_tag "MetaCubeX/mihomo")"
+
+          if [ -z "$TAG" ]; then
+            echo "::error::无法获取 mihomo 最新稳定版本"
             exit 1
           fi
 
-          echo "mihomo version: $VER"
+          echo "mihomo tag: $TAG"
 
-          FILE="mihomo-linux-amd64-${VER}.gz"
-          URL="https://github.com/MetaCubeX/mihomo/releases/download/${VER}/${FILE}"
+          FILE="mihomo-linux-amd64-${TAG}.gz"
+          URL="https://github.com/MetaCubeX/mihomo/releases/download/${TAG}/${FILE}"
 
-          wget -q --show-progress "$URL"
+          rm -f "$FILE"
+          rm -f "mihomo-linux-amd64-${TAG}"
+
+          curl -fL \
+            --retry 3 \
+            --connect-timeout 30 \
+            --max-time 180 \
+            -o "$FILE" \
+            "$URL"
+
+          if [ ! -s "$FILE" ]; then
+            echo "::error::mihomo 下载结果为空"
+            exit 1
+          fi
 
           gzip -d "$FILE"
 
+          if [ ! -f "mihomo-linux-amd64-${TAG}" ]; then
+            echo "::error::mihomo 解压后未找到可执行文件"
+            ls -la
+            exit 1
+          fi
+
           sudo install -m 0755 \
-            "mihomo-linux-amd64-${VER}" \
+            "mihomo-linux-amd64-${TAG}" \
             /usr/local/bin/mihomo
 
           mihomo -v
@@ -362,7 +434,7 @@ jobs:
                   continue
 
               # DOMAIN-KEYWORD、DOMAIN-REGEX、IP-ASN 等规则
-              # 无法表达为 mihomo domain/ipcidr MRS，保留为 classical YAML。
+              # 无法转换成 domain/ipcidr MRS，保留为 classical YAML。
               classical_only.append(line)
 
           def convert(lines, behavior, destination):
@@ -399,11 +471,16 @@ jobs:
 
               if result.returncode != 0:
                   error = result.stderr.strip()[:500]
+
                   print(
                       f"::error::[{name}] "
                       f"{behavior} MRS 转换失败: {error}",
                       file=sys.stderr
                   )
+
+                  if result.stdout.strip():
+                      print(result.stdout.strip()[:500], file=sys.stderr)
+
                   return False
 
               print(
@@ -416,7 +493,11 @@ jobs:
           ok = True
 
           if mrs_domain:
-              domain_path = os.path.join(outdir, f"{name}.mrs")
+              domain_path = os.path.join(
+                  outdir,
+                  f"{name}.mrs"
+              )
+
               ok = convert(
                   mrs_domain,
                   "domain",
@@ -424,7 +505,11 @@ jobs:
               ) and ok
 
           if mrs_ipcidr:
-              ipcidr_path = os.path.join(outdir, f"{name}-ipcidr.mrs")
+              ipcidr_path = os.path.join(
+                  outdir,
+                  f"{name}-ipcidr.mrs"
+              )
+
               ok = convert(
                   mrs_ipcidr,
                   "ipcidr",
@@ -461,12 +546,23 @@ jobs:
           sys.exit(0 if ok else 1)
           PYEOF
 
-          echo "开始扫描 rules/ 目录中的本地规则文件"
+          echo "开始扫描 rules/ 目录中的规则文件"
+
+          FOUND=0
 
           while IFS= read -r -d '' src; do
+            FOUND=1
+
             filename="$(basename "$src")"
             extension="${filename##*.}"
             name="${filename%.*}"
+
+            case "$filename" in
+              sources.json)
+                echo "跳过配置文件: $filename"
+                continue
+                ;;
+            esac
 
             case "$extension" in
               json)
@@ -523,9 +619,22 @@ jobs:
               | sort -z
           )
 
+          if [ "$FOUND" -eq 0 ]; then
+            echo "::warning::rules/ 目录中没有找到 JSON 或 YAML 规则文件"
+          fi
+
           echo
-          echo "当前生成的文件:"
-          find output -maxdepth 1 -type f -print | sort || true
+          echo "当前生成的文件："
+
+          if find output -maxdepth 1 -type f -print -quit | grep -q .; then
+            find output \
+              -maxdepth 1 \
+              -type f \
+              -print \
+              | sort
+          else
+            echo "output/ 目录为空"
+          fi
 
           if [ "$HAS_ERROR" -ne 0 ]; then
             echo "::error::至少有一个规则文件编译失败"
