@@ -239,67 +239,73 @@ jobs:
           done < <(jq -c '.[]' rules/sources.json)
 
       # ---------------------------------------------------------------------
-      # 获取并下载 sing-box
       # ---------------------------------------------------------------------
-      - name: Download sing-box
-        run: |
-          set -e
+# 获取并下载 sing-box
+# ---------------------------------------------------------------------
+- name: Download sing-box
+  run: |
+    set -e
 
-          get_latest_stable_tag() {
-            local repo="$1"
+    get_latest_stable_tag() {
+      local repo="$1"
 
-            git ls-remote --tags --refs \
-              "https://github.com/${repo}.git" \
-              | sed 's#^.*/##' \
-              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-              | sort -V \
-              | tail -n 1
-          }
+      git ls-remote --tags --refs \
+        "https://github.com/${repo}.git" \
+        | sed 's#^.*/##' \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+        | sort -V \
+        | tail -n 1
+    }
 
-          TAG="$(get_latest_stable_tag "SagerNet/sing-box")"
+    TAG="$(get_latest_stable_tag "SagerNet/sing-box")"
 
-          if [ -z "$TAG" ]; then
-            echo "::error::无法获取 sing-box 最新稳定版本"
-            exit 1
-          fi
+    if [ -z "$TAG" ]; then
+      echo "::error::无法获取 sing-box 最新稳定版本"
+      exit 1
+    fi
 
-          VER="${TAG#v}"
+    VER="${TAG#v}"
+    DIR="sing-box-${VER}-linux-amd64"
+    ARCHIVE="${DIR}.tar.gz"
+    URL="https://github.com/SagerNet/sing-box/releases/download/${TAG}/${ARCHIVE}"
 
-          echo "sing-box tag: $TAG"
-          echo "sing-box version: $VER"
+    echo "sing-box tag: $TAG"
+    echo "sing-box version: $VER"
+    echo "下载地址: $URL"
 
-          ARCHIVE="sing-box-${VER}-linux-amd64.tar.gz"
-          URL="https://github.com/SagerNet/sing-box/releases/download/${TAG}/${ARCHIVE}"
+    rm -f "$ARCHIVE"
+    rm -rf "$DIR"
 
-          rm -f "$ARCHIVE"
-          rm -rf "sing-box-${VER}"
+    curl -fL \
+      --retry 3 \
+      --retry-all-errors \
+      --connect-timeout 30 \
+      --max-time 180 \
+      --output "$ARCHIVE" \
+      "$URL"
 
-          curl -fL \
-            --retry 3 \
-            --connect-timeout 30 \
-            --max-time 180 \
-            -o "$ARCHIVE" \
-            "$URL"
+    if [ ! -s "$ARCHIVE" ]; then
+      echo "::error::sing-box 下载结果为空"
+      exit 1
+    fi
 
-          if [ ! -s "$ARCHIVE" ]; then
-            echo "::error::sing-box 下载结果为空"
-            exit 1
-          fi
+    tar -xzf "$ARCHIVE"
 
-          tar -xzf "$ARCHIVE"
+    BINARY="${DIR}/sing-box"
 
-          if [ ! -f "sing-box-${VER}/sing-box" ]; then
-            echo "::error::sing-box 解压后未找到可执行文件"
-            find . -maxdepth 3 -type f -print
-            exit 1
-          fi
+    if [ ! -f "$BINARY" ]; then
+      echo "::error::sing-box 解压后未找到可执行文件"
+      echo "压缩包内容："
+      tar -tzf "$ARCHIVE" | head -n 50
+      exit 1
+    fi
 
-          sudo install -m 0755 \
-            "sing-box-${VER}/sing-box" \
-            /usr/local/bin/sing-box
+    sudo install -m 0755 \
+      "$BINARY" \
+      /usr/local/bin/sing-box
 
-          sing-box version
-
+    echo "sing-box 安装完成"
+    sing-box version
       # ---------------------------------------------------------------------
       # 获取并下载 mihomo
       # ---------------------------------------------------------------------
